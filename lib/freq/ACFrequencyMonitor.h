@@ -4,14 +4,21 @@
 #include <Arduino.h>
 #include <functional>
 
-#define MEDIAN_FILTER_SIZE 7
-
 class ACFrequencyMonitor {
 public:
     ACFrequencyMonitor();
     ~ACFrequencyMonitor();
 
-    bool begin(int zcPin, float minFreq = 45.0, float maxFreq = 65.0);
+    /**
+     * @brief Initializes the monitor.
+     * @param zcPin The GPIO pin for the zero-cross detector input.
+     * @param minFreq The minimum expected AC frequency.
+     * @param maxFreq The maximum expected AC frequency.
+     * @param filterSize The size of the median filter window. MUST BE AN ODD NUMBER (e.g., 3, 5, 7).
+     * @return True on success, false on failure.
+     */
+    bool begin(int zcPin, float minFreq = 45.0, float maxFreq = 65.0, uint8_t filterSize = 5);
+    
     void update();
 
     void attachZeroCrossCallback(std::function<void()> callback);
@@ -32,6 +39,7 @@ private:
 
     // Internal Methods
     void processNewPeriod();
+    void updateFilteredPeriod(unsigned long newPeriod);
 
     // Member Variables
     int _zcPin = -1;
@@ -42,12 +50,15 @@ private:
     volatile unsigned long _lastHardwareZCTime_us = 0;
     volatile bool _newHardwareZcEvent = false;
 
-    unsigned long _currentPeriod_us = 20000; // Default to 50Hz
-    unsigned long _lastGoodPeriod_us = 20000;
-    unsigned long _periodBuffer[MEDIAN_FILTER_SIZE];
+    // Filtering variables
+    uint8_t _filterSize = 0;
+    unsigned long* _periodBuffer = nullptr;
+    unsigned long* _sortedBuffer = nullptr;
     int _bufferIndex = 0;
     bool _bufferFull = false;
-    float _filteredFrequency = 0.0;
+    
+    unsigned long _currentPeriod_us = 20000;
+    float _filteredFrequency = 50.0;
     
     std::function<void()> _zeroCrossCallback = nullptr;
     std::function<void()> _halfCycleCallback = nullptr;

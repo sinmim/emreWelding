@@ -74,7 +74,9 @@ void TriacController::setMeasurementDelay(unsigned int delay_us)
     // Pass the setting down to the monitor
     _freqMonitor.setMeasurementDelay(delay_us);
 }
-
+void TriacController::setLowPassFilterAlpha(float alpha) {
+    _freqMonitor.setLowPassFilterAlpha(alpha);
+}
 void TriacController::enableOutput()
 {
     _outputEnabled = true;

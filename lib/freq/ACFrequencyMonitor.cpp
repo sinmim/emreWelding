@@ -5,17 +5,22 @@ ACFrequencyMonitor *ACFrequencyMonitor::_instance = nullptr;
 
 ACFrequencyMonitor::ACFrequencyMonitor() {}
 
-ACFrequencyMonitor::~ACFrequencyMonitor() {
-    if (_predictiveTimer) esp_timer_delete(_predictiveTimer);
-    if (_halfCycleTimer) esp_timer_delete(_halfCycleTimer);
-    if (_zcPin >= 0) detachInterrupt(digitalPinToInterrupt(_zcPin));
-    
+ACFrequencyMonitor::~ACFrequencyMonitor()
+{
+    if (_predictiveTimer)
+        esp_timer_delete(_predictiveTimer);
+    if (_halfCycleTimer)
+        esp_timer_delete(_halfCycleTimer);
+    if (_zcPin >= 0)
+        detachInterrupt(digitalPinToInterrupt(_zcPin));
+
     // Free dynamically allocated memory
     delete[] _periodBuffer;
     delete[] _sortedBuffer;
 }
 
-bool ACFrequencyMonitor::begin(int zcPin, float minFreq, float maxFreq, uint8_t filterSize) {
+bool ACFrequencyMonitor::begin(int zcPin, float minFreq, float maxFreq, uint8_t filterSize)
+{
     _instance = this;
     _zcPin = zcPin;
 
@@ -25,10 +30,12 @@ bool ACFrequencyMonitor::begin(int zcPin, float minFreq, float maxFreq, uint8_t 
     // Dynamically allocate buffers for the filter
     _periodBuffer = new unsigned long[_filterSize];
     _sortedBuffer = new unsigned long[_filterSize];
-    if (!_periodBuffer || !_sortedBuffer) return false; // Allocation failed
+    if (!_periodBuffer || !_sortedBuffer)
+        return false; // Allocation failed
 
     // Pre-fill buffer with a sensible default (50Hz)
-    for (int i = 0; i < _filterSize; ++i) {
+    for (int i = 0; i < _filterSize; ++i)
+    {
         _periodBuffer[i] = 20000;
     }
 
@@ -44,8 +51,10 @@ bool ACFrequencyMonitor::begin(int zcPin, float minFreq, float maxFreq, uint8_t 
     return (err1 == ESP_OK && err2 == ESP_OK);
 }
 
-void ACFrequencyMonitor::update() {
-    if (_newHardwareZcEvent) {
+void ACFrequencyMonitor::update()
+{
+    if (_newHardwareZcEvent)
+    {
         noInterrupts();
         _newHardwareZcEvent = false;
         interrupts();
@@ -53,75 +62,98 @@ void ACFrequencyMonitor::update() {
     }
 }
 
-void IRAM_ATTR ACFrequencyMonitor::isr_handleHardwareZeroCross() {
-    if (!_instance) return;
+void IRAM_ATTR ACFrequencyMonitor::isr_handleHardwareZeroCross()
+{
+    if (!_instance)
+        return;
     _instance->_lastHardwareZCTime_us = micros();
     _instance->_newHardwareZcEvent = true;
 }
 
-void ACFrequencyMonitor::processNewPeriod() {
+void ACFrequencyMonitor::processNewPeriod()
+{
     static unsigned long last_processed_time = 0;
     unsigned long raw_period = _lastHardwareZCTime_us - last_processed_time;
     last_processed_time = _lastHardwareZCTime_us;
 
     bool periodIsOk = (raw_period > 15000 && raw_period < 22222);
-    if (periodIsOk) {
+    if (periodIsOk)
+    {
         _isFaulty = false;
-        // Add the new valid measurement to the filter
         updateFilteredPeriod(raw_period);
-    } else {
+    }
+    else
+    {
         _isFaulty = true;
-        // On fault, do not update the filter, just freewheel on the last good filtered value.
     }
 
-    if (_debugEnabled) {
+    if (_debugEnabled)
+    {
         Serial.printf("[AC_MONITOR] Raw Period: %lu us. Filtered: %lu us. OK: %d\n", raw_period, _currentPeriod_us, periodIsOk);
     }
-    
+
     long delay_to_next_true_zc = (long)_currentPeriod_us - (long)_measurementDelay_us;
-    if (delay_to_next_true_zc > 0) {
+    if (delay_to_next_true_zc > 0)
+    {
         esp_timer_start_once(_predictiveTimer, delay_to_next_true_zc);
     }
 }
 
-void ACFrequencyMonitor::updateFilteredPeriod(unsigned long newPeriod) {
-    // Add new measurement to the circular buffer
+// In ACFrequencyMonitor.cpp, replace the existing function with this one.
+
+void ACFrequencyMonitor::updateFilteredPeriod(unsigned long newPeriod)
+{
+    // Add the new measurement to our buffer for the median filter.
     _periodBuffer[_bufferIndex++] = newPeriod;
-    if (_bufferIndex >= _filterSize) {
+    if (_bufferIndex >= _filterSize)
+    {
         _bufferIndex = 0;
         _bufferFull = true;
     }
 
-    // Don't calculate median until the buffer is full for the first time
-    if (!_bufferFull) {
-        _currentPeriod_us = newPeriod; // Use raw values until buffer is full
-        return;
+    unsigned long valueForLpf;
+
+    if (_bufferFull)
+    {
+        // --- Stage 1: Median Filter (to reject spikes) ---
+        // Once the buffer is full, we can calculate a median to get a more stable value.
+        for (int i = 0; i < _filterSize; i++)
+        {
+            _sortedBuffer[i] = _periodBuffer[i];
+        }
+        std::sort(_sortedBuffer, _sortedBuffer + _filterSize);
+        valueForLpf = _sortedBuffer[_filterSize / 2];
+    }
+    else
+    {
+        // Before the buffer is full, we use the raw period as the input for the LPF.
+        valueForLpf = newPeriod;
     }
 
-    // Calculate the median
-    for (int i = 0; i < _filterSize; i++) {
-        _sortedBuffer[i] = _periodBuffer[i];
-    }
-    std::sort(_sortedBuffer, _sortedBuffer + _filterSize);
-    
-    // The median is the middle element
-    _currentPeriod_us = _sortedBuffer[_filterSize / 2];
+    // --- Stage 2: Low-Pass Filter (to smooth jitter) ---
+    // This calculation is now ALWAYS performed, ensuring smooth output.
+    // With lpfAlpha = 0.005, this line will produce a very slow-moving average.
+    _currentPeriod_us = (_lpfAlpha * valueForLpf) + ((1.0 - _lpfAlpha) * _currentPeriod_us);
 }
-
-void IRAM_ATTR ACFrequencyMonitor::isr_predictiveCallback(void* arg) {
-    ACFrequencyMonitor* instance = static_cast<ACFrequencyMonitor*>(arg);
-    if (instance->_zeroCrossCallback) {
+void IRAM_ATTR ACFrequencyMonitor::isr_predictiveCallback(void *arg)
+{
+    ACFrequencyMonitor *instance = static_cast<ACFrequencyMonitor *>(arg);
+    if (instance->_zeroCrossCallback)
+    {
         instance->_zeroCrossCallback();
     }
     unsigned long half_period = instance->_currentPeriod_us / 2;
-    if (half_period > 0) {
+    if (half_period > 0)
+    {
         esp_timer_start_once(instance->_halfCycleTimer, half_period);
     }
 }
 
-void IRAM_ATTR ACFrequencyMonitor::isr_halfCycleCallback(void* arg) {
-    ACFrequencyMonitor* instance = static_cast<ACFrequencyMonitor*>(arg);
-    if (instance->_halfCycleCallback) {
+void IRAM_ATTR ACFrequencyMonitor::isr_halfCycleCallback(void *arg)
+{
+    ACFrequencyMonitor *instance = static_cast<ACFrequencyMonitor *>(arg);
+    if (instance->_halfCycleCallback)
+    {
         instance->_halfCycleCallback();
     }
 }
@@ -130,10 +162,16 @@ void IRAM_ATTR ACFrequencyMonitor::isr_halfCycleCallback(void* arg) {
 void ACFrequencyMonitor::attachZeroCrossCallback(std::function<void()> callback) { _zeroCrossCallback = callback; }
 void ACFrequencyMonitor::attachHalfCycleCallback(std::function<void()> callback) { _halfCycleCallback = callback; }
 void ACFrequencyMonitor::setMeasurementDelay(unsigned int delay_us) { _measurementDelay_us = delay_us; }
+void ACFrequencyMonitor::setLowPassFilterAlpha(float alpha)
+{
+    _lpfAlpha = constrain(alpha, 0.0, 1.0); // Ensure alpha is between 0.0 and 1.0
+}
 void ACFrequencyMonitor::setDebug(bool enabled) { _debugEnabled = enabled; }
 unsigned long ACFrequencyMonitor::getPeriod() const { return _currentPeriod_us; }
 bool ACFrequencyMonitor::isFaulty() const { return _isFaulty; }
-float ACFrequencyMonitor::getFrequency() const {
-    if (_currentPeriod_us == 0) return 0.0;
+float ACFrequencyMonitor::getFrequency() const
+{
+    if (_currentPeriod_us == 0)
+        return 0.0;
     return 1000000.0 / _currentPeriod_us;
 }

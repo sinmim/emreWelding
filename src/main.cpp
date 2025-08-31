@@ -46,6 +46,13 @@ void setup()
   // For debugging the predictive timer:
   // controller._freqMonitor.setDebug(true);
 
+  // 3. Set the low-pass filter strength (smooths jitter)
+  // A smaller alpha means more smoothing. 1.0 means OFF.
+  // Good values to test are between 0.05 and 0.5
+  float lpfAlpha = 0.99;
+  controller.setLowPassFilterAlpha(lpfAlpha);
+
+
   controller.setPower(0);
   controller.enableOutput();
 

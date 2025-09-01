@@ -10,19 +10,36 @@ void powerChangingTask(void *pvParameters)
 {
   float power = 0.0;
   float step = 1.0;
+  vTaskDelay(2000 / portTICK_PERIOD_MS);
+
+  for (int i = 0; i < 400; i++)
+  {
+    float val = i / 10.0;
+    controller.setPower(val);
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+  }
 
   while (1)
   {
-    // power += step;
-    // if (power >= 50.0) {
-    //     power = 50.0;
-    //     step = -1.0;
-    // } else if (power <= 0.0) {
-    //     power = 0.0;
-    //     step = 1.0;
-    // }
-    // controller.setPower(power);
-    controller.setPower(30);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+
+  while (1)
+  {
+    // The user's original power-ramping code is preserved but commented out.
+    power += step;
+    if (power >= 20.0)
+    {
+      power = 20.0;
+      step = -1.0;
+    }
+    else if (power <= 0.0)
+    {
+      power = 0.0;
+      step = 1.0;
+    }
+    controller.setPower(power);
+    // controller.setPower(30); // Set a fixed power for testing
     vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
@@ -30,7 +47,7 @@ void powerChangingTask(void *pvParameters)
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("Predictive TRIAC Controller Test");
+  Serial.println("Reactive TRIAC Controller Test");
 
   uint8_t myFilterSize = 7;
 
@@ -41,18 +58,17 @@ void setup()
       ;
   }
 
-  // Set the known hardware delay of your zero-cross detector
+  // 1. Set the known hardware delay of your zero-cross detector
+  // This is crucial for accurate timing.
   controller.setMeasurementDelay(3000);
-  // For debugging the predictive timer:
-  // controller._freqMonitor.setDebug(true);
 
-  // 3. Set the low-pass filter strength (smooths jitter)
+  // 2. Set the low-pass filter strength (smooths jitter in frequency measurement)
   // A smaller alpha means more smoothing. 1.0 means OFF.
-  // Good values to test are between 0.05 and 0.5
+  // Good values to test are between 0.05 and 0.5. A high value makes it more reactive.
   float lpfAlpha = 0.99;
   controller.setLowPassFilterAlpha(lpfAlpha);
 
-
+  // Enable the output
   controller.setPower(0);
   controller.enableOutput();
 
@@ -61,7 +77,8 @@ void setup()
 
 void loop()
 {
-  controller.update();
+  // The controller.update() function is no longer needed.
+  // All logic is now handled by hardware interrupts.
 
   static unsigned long lastPrintTime = 0;
   if (millis() - lastPrintTime > 100)
@@ -73,4 +90,3 @@ void loop()
                   controller.isFaulty() ? "YES" : "NO");
   }
 }
-// hello git

@@ -28,11 +28,6 @@ public:
     bool begin(int zcPin, int triacPin, float minFreq = 45.0, float maxFreq = 65.0, uint8_t filterSize = 5);
 
     /**
-     * @brief Must be called repeatedly in the main loop to process frequency data.
-     */
-    void update();
-
-    /**
      * @brief Sets the power output to the load.
      * @param power The desired power level from 0.0 (off) to 100.0 (full on).
      */
@@ -54,42 +49,48 @@ public:
      */
     void disableOutput();
 
-    // --- Status Functions ---
-    bool isEnabled() const;
-    bool isFaulty() const;
-    float getFrequency() const;
-    float getCurrentPower() const;
-
     /**
      * @brief Sets the alpha for the low-pass filter on the period measurement.
      * @param alpha Smoothing factor from 0.0 (heavy filtering) to 1.0 (no filtering).
      */
     void setLowPassFilterAlpha(float alpha);
 
+    // --- Status Functions ---
+    bool isEnabled() const;
+    bool isFaulty() const;
+    float getFrequency() const;
+    float getCurrentPower() const;
+
 private:
     // Internal instance of the frequency monitor
     ACFrequencyMonitor _freqMonitor;
 
     // Pin and state variables
+    int _zcPin = -1;
     int _triacPin = -1;
+    unsigned int _measurementDelay_us = 0;
     bool _outputEnabled = false;
     float _powerLevel = 0.0;
     float _firingAngle = 180.0;
+    volatile unsigned long _lastZcTime_us = 0;
 
     // ESP32 hardware timer handles
     esp_timer_handle_t _firingTimer = nullptr;
     esp_timer_handle_t _stopPulseTimer = nullptr;
+    esp_timer_handle_t _halfCycleTimer = nullptr; // <-- ADDED: Timer for the falling edge
 
     // Private helper methods
     float _mapPowerToAngle(float power);
 
     // Static ISR wrappers required for C-style callbacks
-    static void IRAM_ATTR isr_handleTrueZeroCross(void *arg);
+    static void IRAM_ATTR isr_handleHardwareZeroCross(void *arg);
+    static void IRAM_ATTR isr_handleHalfCycle(void *arg); // <-- ADDED: ISR for the falling edge timer
     static void IRAM_ATTR isr_fireTriac(void *arg);
     static void IRAM_ATTR isr_stopPulseTrain(void *arg);
 
     // Member function implementations for ISRs
-    void _onTrueZeroCross();
+    void _onHardwareZeroCross();
+    void _onHalfCycle(); // <-- ADDED: Handler for the falling edge
     void _fireTriac();
     void _stopPulseTrain();
 };

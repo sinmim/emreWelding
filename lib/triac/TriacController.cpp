@@ -10,10 +10,15 @@ TriacController::~TriacController()
         esp_timer_delete(_firingTimer);
     if (_stopPulseTimer)
         esp_timer_delete(_stopPulseTimer);
+    if (_halfCycleTimer) // <-- ADDED
+        esp_timer_delete(_halfCycleTimer);
+    if (_zcPin >= 0)
+        detachInterrupt(digitalPinToInterrupt(_zcPin));
 }
 
 bool TriacController::begin(int zcPin, int triacPin, float minFreq, float maxFreq, uint8_t filterSize)
 {
+    _zcPin = zcPin;
     _triacPin = triacPin;
 
     // 1. Configure LEDC PWM Peripheral for the pulse train
@@ -37,46 +42,48 @@ bool TriacController::begin(int zcPin, int triacPin, float minFreq, float maxFre
     if (esp_timer_create(&stop_timer_args, &_stopPulseTimer) != ESP_OK)
         return false;
 
-    // 4. Initialize the AC Frequency Monitor, passing the filterSize to it
-    if (!_freqMonitor.begin(zcPin, minFreq, maxFreq, filterSize))
+    // 4. Create the timer that will simulate the falling-edge zero-cross
+    const esp_timer_create_args_t half_cycle_timer_args = {// <-- ADDED BLOCK
+                                                           .callback = &isr_handleHalfCycle,
+                                                           .arg = this,
+                                                           .name = "half_cycle_timer"};
+    if (esp_timer_create(&half_cycle_timer_args, &_halfCycleTimer) != ESP_OK)
+        return false;
+
+    // 5. Initialize the AC Frequency Monitor
+    if (!_freqMonitor.begin(filterSize, minFreq, maxFreq))
     {
         return false;
     }
 
-    // 5. Attach our internal handler to the monitor's predictive callbacks
-    auto handler = [this]()
-    { isr_handleTrueZeroCross(this); };
-    _freqMonitor.attachZeroCrossCallback(handler);
-    _freqMonitor.attachHalfCycleCallback(handler);
+    // 6. Attach the hardware interrupt for the RISING-EDGE-ONLY zero-cross detector
+    pinMode(_zcPin, INPUT_PULLUP);
+    // Make sure this is set to RISING, not CHANGE
+    attachInterruptArg(digitalPinToInterrupt(_zcPin), isr_handleHardwareZeroCross, this, RISING);
 
-    // 6. Set initial state
+    // 7. Set initial state
     _outputEnabled = true;
     setPower(0);
 
     return true;
 }
 
-void TriacController::update()
-{
-    _freqMonitor.update();
-}
-
 void TriacController::setPower(float power)
 {
     _powerLevel = constrain(power, 0.0, 100.0);
-    // This class now manages the firing angle internally.
-    // The monitor no longer needs to know about it.
     _firingAngle = _mapPowerToAngle(_powerLevel);
 }
 
 void TriacController::setMeasurementDelay(unsigned int delay_us)
 {
-    // Pass the setting down to the monitor
-    _freqMonitor.setMeasurementDelay(delay_us);
+    _measurementDelay_us = delay_us;
 }
-void TriacController::setLowPassFilterAlpha(float alpha) {
+
+void TriacController::setLowPassFilterAlpha(float alpha)
+{
     _freqMonitor.setLowPassFilterAlpha(alpha);
 }
+
 void TriacController::enableOutput()
 {
     _outputEnabled = true;
@@ -85,8 +92,7 @@ void TriacController::enableOutput()
 void TriacController::disableOutput()
 {
     _outputEnabled = false;
-    // Immediately stop any ongoing pulse for safety
-    _stopPulseTrain();
+    _stopPulseTrain(); // Immediately stop any ongoing pulse for safety
 }
 
 // --- Status Functions ---
@@ -103,50 +109,98 @@ float TriacController::_mapPowerToAngle(float power)
     return maxAngle - (power / 100.0) * (maxAngle - minAngle);
 }
 
-void IRAM_ATTR TriacController::_onTrueZeroCross()
+void IRAM_ATTR TriacController::isr_handleHardwareZeroCross(void *arg)
 {
-    // This function is called by the monitor at the predicted TRUE zero-cross moment.
+    TriacController *instance = static_cast<TriacController *>(arg);
+    unsigned long now_us = micros();
+
+    // Calculate raw period and update the frequency monitor
+    unsigned long raw_period_us = now_us - instance->_lastZcTime_us;
+    instance->_lastZcTime_us = now_us;
+    instance->_freqMonitor.addNewPeriodSample(raw_period_us);
+
+    // --- MODIFIED BLOCK ---
+    // Trigger the firing logic for the rising edge (first half-cycle)
+    instance->_onHardwareZeroCross();
+
+    // Now, arm the timer to trigger again at the simulated falling edge
+    unsigned long half_period_us = instance->_freqMonitor.getPeriod() / 2;
+    long half_cycle_timer_delay = (long)half_period_us - (long)instance->_measurementDelay_us;
+    if (half_cycle_timer_delay > 0)
+    {
+        esp_timer_start_once(instance->_halfCycleTimer, half_cycle_timer_delay);
+    }
+}
+
+// NEW FUNCTION: Called when the half-cycle timer expires
+void IRAM_ATTR TriacController::isr_handleHalfCycle(void *arg)
+{
+    static_cast<TriacController *>(arg)->_onHalfCycle();
+}
+
+void TriacController::_onHardwareZeroCross()
+{
     if (!_outputEnabled || _freqMonitor.isFaulty())
     {
+        esp_timer_stop(_firingTimer);
         return;
     }
 
-    // Calculate the delay needed to reach the desired firing angle
-    unsigned long half_period = _freqMonitor.getPeriod() / 2;
-    unsigned long angle_delay_us = (unsigned long)((_firingAngle / 180.0) * half_period);
+    unsigned long half_period_us = _freqMonitor.getPeriod() / 2;
+    if (half_period_us == 0)
+        return;
 
-    // Arm the firing timer with this delay. The timer will call _fireTriac() when it expires.
+    unsigned long angle_delay_us = (unsigned long)((_firingAngle / 180.0) * half_period_us);
+
+    // For the hardware-detected ZC, we must compensate for the detector's delay
+    long timer_delay_us = (long)angle_delay_us - (long)_measurementDelay_us;
+
+    if (timer_delay_us > 50)
+    {
+        esp_timer_start_once(_firingTimer, timer_delay_us);
+    }
+    else
+    {
+        _fireTriac();
+    }
+}
+
+// NEW FUNCTION: Handles the firing logic for the simulated falling edge
+void TriacController::_onHalfCycle()
+{
+    if (!_outputEnabled || _freqMonitor.isFaulty())
+    {
+        esp_timer_stop(_firingTimer);
+        return;
+    }
+
+    unsigned long half_period_us = _freqMonitor.getPeriod() / 2;
+    if (half_period_us == 0)
+        return;
+
+    unsigned long angle_delay_us = (unsigned long)((_firingAngle / 180.0) * half_period_us);
+
+    // For the simulated ZC, there is no hardware delay to compensate for.
+    // We simply use the calculated angle delay directly.
     if (angle_delay_us > 50)
-    { // Add small safety margin
+    {
         esp_timer_start_once(_firingTimer, angle_delay_us);
     }
     else
     {
-        _fireTriac(); // Fire immediately if angle is at or near zero
+        _fireTriac();
     }
 }
 
 void IRAM_ATTR TriacController::_fireTriac()
 {
-    // This is called after the angle delay. It starts the high-frequency pulse train.
     ledcWrite(LEDC_CHANNEL, LEDC_DUTY_CYCLE);
-    // Arm the stop timer to turn the pulse train off after a short duration.
     esp_timer_start_once(_stopPulseTimer, PULSE_TRAIN_DURATION_US);
 }
 
 void IRAM_ATTR TriacController::_stopPulseTrain()
 {
-    // This is called by the stop timer to end the pulse train.
     ledcWrite(LEDC_CHANNEL, 0);
-}
-
-// --- Static ISR Wrappers ---
-// These C-style functions are required for the ESP-IDF timer and interrupt system.
-// They simply cast the 'arg' pointer back to our class instance and call the appropriate member function.
-
-void IRAM_ATTR TriacController::isr_handleTrueZeroCross(void *arg)
-{
-    static_cast<TriacController *>(arg)->_onTrueZeroCross();
 }
 
 void IRAM_ATTR TriacController::isr_fireTriac(void *arg)

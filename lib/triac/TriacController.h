@@ -1,3 +1,5 @@
+// TriacController.h
+
 #ifndef TRIAC_CONTROLLER_H
 #define TRIAC_CONTROLLER_H
 
@@ -13,6 +15,14 @@
 class TriacController
 {
 public:
+    // <<< START: ADDED CODE >>>
+    /**
+     * @brief Defines the function signature for the zero-cross event callback.
+     * @param timestamp_us The timestamp (from micros()) when the ZC event occurred.
+     */
+    using ZcCallback_t = void (*)(unsigned long timestamp_us);
+    // <<< END: ADDED CODE >>>
+
     TriacController();
     ~TriacController();
 
@@ -54,6 +64,16 @@ public:
      * @param alpha Smoothing factor from 0.0 (heavy filtering) to 1.0 (no filtering).
      */
     void setLowPassFilterAlpha(float alpha);
+    
+    // <<< START: ADDED CODE >>>
+    /**
+     * @brief Attaches a user-defined callback function to the hardware zero-cross event.
+     * @param callback The function to call when a zero-cross is detected. The function
+     * must take a single 'unsigned long' argument (the timestamp).
+     */
+    void attachZeroCrossCallback(ZcCallback_t callback);
+    // <<< END: ADDED CODE >>>
+
 
     // --- Status Functions ---
     bool isEnabled() const;
@@ -62,6 +82,11 @@ public:
     float getCurrentPower() const;
 
 private:
+    // <<< START: ADDED CODE >>>
+    // Callback function pointer for external zero-cross event handling
+    ZcCallback_t _zcCallback = nullptr;
+    // <<< END: ADDED CODE >>>
+
     // Internal instance of the frequency monitor
     ACFrequencyMonitor _freqMonitor;
 

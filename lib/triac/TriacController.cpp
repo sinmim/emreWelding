@@ -1,6 +1,9 @@
+// TriacController.cpp
+
 #include "TriacController.h"
 #include <Arduino.h>
 
+// ... (constructor and destructor remain unchanged) ...
 TriacController::TriacController() {}
 
 TriacController::~TriacController()
@@ -16,6 +19,8 @@ TriacController::~TriacController()
         detachInterrupt(digitalPinToInterrupt(_zcPin));
 }
 
+
+// ... (begin() method remains unchanged) ...
 bool TriacController::begin(int zcPin, int triacPin, float minFreq, float maxFreq, uint8_t filterSize)
 {
     _zcPin = zcPin;
@@ -68,6 +73,8 @@ bool TriacController::begin(int zcPin, int triacPin, float minFreq, float maxFre
     return true;
 }
 
+
+// ... (setPower, setMeasurementDelay, etc. remain unchanged) ...
 void TriacController::setPower(float power)
 {
     _powerLevel = constrain(power, 0.0, 100.0);
@@ -95,19 +102,32 @@ void TriacController::disableOutput()
     _stopPulseTrain(); // Immediately stop any ongoing pulse for safety
 }
 
+
+// <<< START: ADDED CODE >>>
+void TriacController::attachZeroCrossCallback(ZcCallback_t callback)
+{
+    _zcCallback = callback;
+}
+// <<< END: ADDED CODE >>>
+
+
 // --- Status Functions ---
+// ... (status functions remain unchanged) ...
 bool TriacController::isEnabled() const { return _outputEnabled; }
 bool TriacController::isFaulty() const { return _freqMonitor.isFaulty(); }
 float TriacController::getFrequency() const { return _freqMonitor.getFrequency(); }
 float TriacController::getCurrentPower() const { return _powerLevel; }
 
+
 // --- Private Methods ---
+// ... (_mapPowerToAngle remains unchanged) ...
 float TriacController::_mapPowerToAngle(float power)
 {
     const float minAngle = 5.0;
     const float maxAngle = 175.0;
     return maxAngle - (power / 100.0) * (maxAngle - minAngle);
 }
+
 
 void IRAM_ATTR TriacController::isr_handleHardwareZeroCross(void *arg)
 {
@@ -119,7 +139,15 @@ void IRAM_ATTR TriacController::isr_handleHardwareZeroCross(void *arg)
     instance->_lastZcTime_us = now_us;
     instance->_freqMonitor.addNewPeriodSample(raw_period_us);
 
-    // --- MODIFIED BLOCK ---
+    // <<< START: MODIFIED BLOCK >>>
+    // If an external callback is attached, invoke it with the current timestamp.
+    // This is the key for external measurements like RMS voltage.
+    if (instance->_zcCallback != nullptr)
+    {
+        instance->_zcCallback(now_us);
+    }
+    // <<< END: MODIFIED BLOCK >>>
+
     // Trigger the firing logic for the rising edge (first half-cycle)
     instance->_onHardwareZeroCross();
 
@@ -132,6 +160,7 @@ void IRAM_ATTR TriacController::isr_handleHardwareZeroCross(void *arg)
     }
 }
 
+// ... (all other functions remain unchanged) ...
 // NEW FUNCTION: Called when the half-cycle timer expires
 void IRAM_ATTR TriacController::isr_handleHalfCycle(void *arg)
 {

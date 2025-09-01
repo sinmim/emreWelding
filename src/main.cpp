@@ -3,6 +3,7 @@
 
 #define ZC_INPUT_PIN 14
 #define TRIAC_OUTPUT_PIN 48
+#define VOLTAGE_ADC_PIN 1
 
 TriacController controller;
 
@@ -12,7 +13,7 @@ void powerChangingTask(void *pvParameters)
   float step = 1.0;
   vTaskDelay(2000 / portTICK_PERIOD_MS);
 
-  for (int i = 0; i < 400; i++)
+  for (int i = 0; i < 300; i++)
   {
     float val = i / 10.0;
     controller.setPower(val);
@@ -44,9 +45,16 @@ void powerChangingTask(void *pvParameters)
   }
 }
 
+volatile bool newZcEvent = false;
+volatile unsigned long zcTimestamp = 0;
+float voltage;
+
 void setup()
 {
   Serial.begin(115200);
+  // Configure ADC
+  analogReadResolution(12); // 12-bit resolution (0-4095) 
+  pinMode(VOLTAGE_ADC_PIN, INPUT);
   Serial.println("Reactive TRIAC Controller Test");
 
   uint8_t myFilterSize = 7;
@@ -71,7 +79,6 @@ void setup()
   // Enable the output
   controller.setPower(0);
   controller.enableOutput();
-
   xTaskCreate(powerChangingTask, "powerTask", 2048, NULL, 5, NULL);
 }
 
@@ -84,9 +91,10 @@ void loop()
   if (millis() - lastPrintTime > 100)
   {
     lastPrintTime = millis();
-    Serial.printf("Power: %.1f%%, Freq: %.2f Hz, Fault: %s\n",
+    Serial.printf("Power: %.1f%%, Freq: %.2f Hz, Fault: %s\n Volt: %.2f V",
                   controller.getCurrentPower(),
                   controller.getFrequency(),
-                  controller.isFaulty() ? "YES" : "NO");
+                  controller.isFaulty() ? "YES" : "NO",
+                  analogReadMilliVolts(VOLTAGE_ADC_PIN) / 1000.0);
   }
 }

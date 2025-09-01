@@ -1,100 +1,91 @@
 #include <Arduino.h>
 #include "TriacController.h"
-
+#include <PID_v1.h> // Include the PID library
+#include "sensor.h"
+// Pin definitions
 #define ZC_INPUT_PIN 14
 #define TRIAC_OUTPUT_PIN 48
 #define VOLTAGE_ADC_PIN 1
 
+// --- PID Controller Setup ---
+double Setpoint, Input, Output;
+
+double Kp = 0.25;  
+double Ki = 0.8; 
+double Kd = 0; 
+
+// Create a PID controller object
+PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 TriacController controller;
 
-void powerChangingTask(void *pvParameters)
+double getCalibratedRMSVoltage()
 {
-  float power = 0.0;
-  float step = 1.0;
-  vTaskDelay(2000 / portTICK_PERIOD_MS);
-
-  for (int i = 0; i < 300; i++)
-  {
-    float val = i / 10.0;
-    controller.setPower(val);
-    vTaskDelay(20 / portTICK_PERIOD_MS);
-  }
-
-  while (1)
-  {
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-
-  while (1)
-  {
-    // The user's original power-ramping code is preserved but commented out.
-    power += step;
-    if (power >= 20.0)
-    {
-      power = 20.0;
-      step = -1.0;
-    }
-    else if (power <= 0.0)
-    {
-      power = 0.0;
-      step = 1.0;
-    }
-    controller.setPower(power);
-    // controller.setPower(30); // Set a fixed power for testing
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-  }
+  updateSensor();
+  // Apply calibration factor
+  return getVoltage() ;
 }
-
-volatile bool newZcEvent = false;
-volatile unsigned long zcTimestamp = 0;
-float voltage;
 
 void setup()
 {
   Serial.begin(115200);
-  // Configure ADC
-  analogReadResolution(12); // 12-bit resolution (0-4095) 
-  pinMode(VOLTAGE_ADC_PIN, INPUT);
-  Serial.println("Reactive TRIAC Controller Test");
+  Serial.println("TRIAC PID Voltage Controller");
 
+  initSensor();
+
+  // Initialize TriacController
   uint8_t myFilterSize = 7;
-
   if (!controller.begin(ZC_INPUT_PIN, TRIAC_OUTPUT_PIN, 45.0, 65.0, myFilterSize))
   {
     Serial.println("Failed to initialize Triac Controller!");
     while (1)
-      ;
+      ; // Halt on failure
   }
 
-  // 1. Set the known hardware delay of your zero-cross detector
-  // This is crucial for accurate timing.
   controller.setMeasurementDelay(3000);
+  controller.setLowPassFilterAlpha(0.99);
 
-  // 2. Set the low-pass filter strength (smooths jitter in frequency measurement)
-  // A smaller alpha means more smoothing. 1.0 means OFF.
-  // Good values to test are between 0.05 and 0.5. A high value makes it more reactive.
-  float lpfAlpha = 0.99;
-  controller.setLowPassFilterAlpha(lpfAlpha);
+  // --- Initialize PID Controller ---
+  Setpoint = 0.0;                // Start with a target voltage of 0
+  myPID.SetMode(AUTOMATIC);      // Turn the PID on
+  myPID.SetSampleTime(50);       // Set PID compute interval to 50ms
+  myPID.SetOutputLimits(0, 100); // Controller output is 0-100% power
 
-  // Enable the output
+  // Enable the TRIAC output
   controller.setPower(0);
   controller.enableOutput();
-  xTaskCreate(powerChangingTask, "powerTask", 2048, NULL, 5, NULL);
+
+  Serial.println("Setup complete. Enter target voltage in Serial Monitor.");
 }
 
 void loop()
 {
-  // The controller.update() function is no longer needed.
-  // All logic is now handled by hardware interrupts.
+  // Check for new setpoint from Serial monitor
+  if (Serial.available() > 0)
+  {
+    String inputString = Serial.readStringUntil('\n');
+    float newSetpoint = inputString.toFloat();
+    if (newSetpoint >= 0)
+    {
+      Setpoint = newSetpoint;
+      Serial.print("New Setpoint received: ");
+      Serial.println(Setpoint);
+    }
+  }
 
+  // Update PID control loop
+  Input = getCalibratedRMSVoltage(); // Read current voltage
+  myPID.Compute();                   // Calculate required power
+  controller.setPower(Output);       // Apply power to TRIAC
+
+  // Print status periodically for debugging
   static unsigned long lastPrintTime = 0;
-  if (millis() - lastPrintTime > 100)
+  if (millis() - lastPrintTime > 200)
   {
     lastPrintTime = millis();
-    Serial.printf("Power: %.1f%%, Freq: %.2f Hz, Fault: %s\n Volt: %.2f V",
-                  controller.getCurrentPower(),
-                  controller.getFrequency(),
-                  controller.isFaulty() ? "YES" : "NO",
-                  analogReadMilliVolts(VOLTAGE_ADC_PIN) / 1000.0);
+    Serial.printf("Setpoint: %.1fV, Current: %.1fV, PID Out (Power): %.1f%%, Freq: %.2fHz\n",
+                  Setpoint,
+                  Input,
+                  Output,
+                  controller.getFrequency());
   }
 }
